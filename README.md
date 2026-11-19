@@ -10,7 +10,9 @@ Pulls a company's public SEC documents into one organized folder:
 | `Earnings Releases/` | EX-99 exhibits of 8-Ks filed under Item 2.02 | EDGAR, last N years |
 | `Indentures/` | Base and supplemental indentures, officer's certificates setting note terms | See below |
 | `Credit Agreements/` | Credit and loan agreements, amendments, intercreditor and collateral agreements | See below |
-| `index.csv` | Every document with form, dates, description, source URL and download status | |
+| `Transcripts/`, `Presentations/` | Earnings call and conference transcripts, investor presentations | Company website (see below) |
+| `index.csv` | Every document with source (EDGAR or company website), form, dates, description, URL and download status | |
+| `not_found.csv` | Debt documents the company lists as material contracts that were not found anywhere | 40-F filers only |
 
 Files are saved as PDF (default) or as the original HTML.
 
@@ -27,6 +29,18 @@ Foreign issuers that file 40-F or 20-F (e.g. Canadian MJDS filers) often leave i
 6. **6-Ks filed within 30 days after a prospectus supplement (SUPPL, 424B2, 424B5).** Executed base and supplemental indentures are usually filed then, at closing.
 
 Names come from the document's cover page where possible, e.g. `2012-08-08 Fifth Supplemental Indenture - 2.500% Notes due 2018, 3.750% Notes due 2023, 5.400% Notes due 2043.pdf`. Unexecuted templates from shelf registrations are prefixed `Form of`.
+
+## Canadian companies: EDGAR, then the company website, then a "not found" report
+
+For 40-F and 20-F filers the tool searches in this order:
+
+1. **EDGAR**, as above.
+2. **The company's website.** The address is taken from the Annual Information Form (AIF). The investor pages are crawled (same domain, robots.txt respected, 1 request per second, at most 80 pages) for transcripts, presentations, indentures and credit agreements. Reports already pulled from EDGAR are not downloaded again.
+3. **A "not found" report.** Every AIF has a required Material Contracts section listing the contracts that are material and still in effect. Indentures and credit agreements in that list are matched by date against what steps 1 and 2 found. Anything unmatched is printed and written to `not_found.csv`, pointing you to SEDAR+.
+
+SEDAR+ itself is not searched. It has no API, and its terms of use prohibit automated access.
+
+`--site https://company.com/investors/` searches a website for any company, including US ones. `--no-site` skips the website.
 
 ## Setup
 
@@ -71,7 +85,9 @@ Re-running is safe. Files that already exist are skipped, so a re-run only fetch
 - **Annual reports filed before 2017** have no hyperlinked exhibit index, so older debt docs need the 8-K scan or a manual check. A warning is printed when an annual report has no hyperlinks.
 - **Debt docs for foreign issuers come from full history, not just what is in force.** Indentures for notes that have since been repaid are included. Check maturities before relying on a document.
 - **Foreign issuers' credit agreements** are often not filed on EDGAR at all. Canadian issuers usually file them on SEDAR+ only, when they file them at all.
-- **Canadian SEDAR+ filings** are not covered, only what is also filed on EDGAR.
+- **Canadian SEDAR+ filings** are not searched (no API; terms prohibit automated access). `not_found.csv` lists the debt documents to look up there manually.
+- **The not-found check covers debt documents listed in the AIF only.** A supplemental indenture is not checked individually when the AIF lists it together with its base indenture. Items without a date cannot be matched and are always reported.
+- **Company websites vary.** The crawl uses link text and file names, so a site that labels documents oddly or loads them with JavaScript may return little. Website documents are filtered by year, not exact date.
 - Classification uses keyword rules. Unusual titles can be missed or misfiled. `index.csv` lists the source URL for every file so you can check.
 
 ## Tests

@@ -9,7 +9,8 @@ from pathlib import Path
 from typing import Callable
 
 from . import classify as cls
-from .edgar import Company, EdgarClient, EdgarError, Filing, filing_documents, list_filings
+from . import site as sitemod
+from .edgar import Company, EdgarClient, EdgarError, Filing, HttpClient, filing_documents, list_filings
 from .render import Renderer
 
 ANNUAL = {"10-K", "20-F", "40-F"}
@@ -36,6 +37,16 @@ class Task:
     description: str = ""
     status: str = ""
     path: Path | None = None
+    doc_date: date | None = None  # agreement date, for debt documents
+    source: str = "EDGAR"
+
+
+@dataclass
+class Missing:
+    category: str
+    document: str
+    expected_because: str
+    where_to_look: str
 
 
 @dataclass
@@ -43,6 +54,9 @@ class Plan:
     company: Company
     tasks: list[Task] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+    missing: list[Missing] = field(default_factory=list)
+    site_client: HttpClient | None = None
 
     def add(self, task: Task) -> None:
         task.url = cls.normalize_url(task.url)
@@ -66,8 +80,11 @@ def plan_documents(
     forms: tuple[str, ...] = DEFAULT_FORMS,
     earnings: bool = True,
     debt: bool = True,
+    site: str | None = "auto",
     log: Callable[[str], None] = print,
 ) -> Plan:
+    """`site`: "auto" crawls the company website for 40-F/20-F filers, a URL crawls that site
+    for any company, None skips the website."""
     since = date.today() - timedelta(days=round(365.25 * years))
     plan = Plan(company)
     filings = list_filings(client, company.cik, since)
@@ -103,7 +120,77 @@ def plan_documents(
 
     if debt:
         _plan_debt_documents(client, filings, plan, log)
+
+    foreign = any(f.form in FOREIGN_ANNUAL for f in filings[:400])
+    aif = _latest_aif(client, filings) if foreign else None
+    site_url = site if site not in (None, "auto") else None
+    if site == "auto" and foreign:
+        site_url = sitemod.website_from_text(aif[1]) if aif else None
+        if site_url is None:
+            plan.warnings.append("Company website not found in the AIF. Pass --site URL to search it.")
+    if site_url:
+        _plan_company_site(plan, site_url, since, debt, log)
+    if debt and aif:
+        _check_material_contracts(plan, aif)
     return plan
+
+
+def _latest_aif(client: EdgarClient, filings: list[Filing]) -> tuple[str, str] | None:
+    """URL and text of the Annual Information Form attached to the latest 40-F."""
+    latest = next((f for f in filings if f.form == "40-F"), None)
+    if latest is None:
+        return None
+    for d in filing_documents(client, latest):
+        if d.doc_type.upper().startswith("EX-99"):
+            opening = cls.document_opening(client.get_head_text(d.url))
+            if cls.report_title(opening) == "Annual Information Form":
+                return d.url, cls.document_opening(client.get_text(d.url), 10**8)
+    return None
+
+
+def _plan_company_site(plan: Plan, site_url: str, since: date, debt: bool, log) -> None:
+    """Second channel after EDGAR: transcripts, presentations and debt documents on the
+    company's own website."""
+    plan.site_client = HttpClient("Mozilla/5.0 (compatible; docpull/0.1)", min_interval=1.0)
+    try:
+        docs = sitemod.crawl(plan.site_client, site_url, log=log)
+    except EdgarError as e:
+        plan.warnings.append(f"Could not read company website {site_url}: {e}")
+        return
+    for d in docs:
+        is_debt = d.category in (cls.INDENTURE, cls.CREDIT)
+        if is_debt and not debt:
+            continue
+        if not is_debt and (d.year is None or d.year < since.year):
+            continue
+        when = cls.agreement_date(d.text) if is_debt else None
+        plan.add(Task(d.category, d.url, d.name, "website", None, None, d.text, doc_date=when, source="company website"))
+
+
+def _check_material_contracts(plan: Plan, aif: tuple[str, str]) -> None:
+    """Compare debt documents the AIF lists as material contracts with what was found."""
+    found = [t for t in plan.tasks if t.category in (cls.INDENTURE, cls.CREDIT)]
+    listed = [(item, cls.classify(item)) for item in sitemod.material_contracts(aif[1])]
+    listed = [(item, label) for item, label in listed if label]
+    if not listed:
+        plan.notes.append("AIF Material Contracts lists no indentures or credit agreements.")
+        return
+    hits = 0
+    for item, label in listed:
+        when = cls.agreement_date(item)
+        if when and any(t.category == label and t.doc_date == when for t in found):
+            hits += 1
+            continue
+        plan.missing.append(Missing(
+            label,
+            f"{when.isoformat() + ' ' if when else ''}{cls.short_description(item)}",
+            "Listed in AIF Material Contracts" + ("" if when else " (no date to match on)"),
+            "Not found on EDGAR or the company website. Check SEDAR+.",
+        ))
+    plan.notes.append(f"AIF Material Contracts lists {len(listed)} debt documents: {hits} found, "
+                      f"{len(listed) - hits} not found.")
+    if not any(label == cls.CREDIT for _, label in listed):
+        plan.notes.append("AIF Material Contracts lists no credit agreement.")
 
 
 def _plan_6k(client: EdgarClient, f: Filing, plan: Plan, debt_only: bool = False) -> None:
@@ -253,7 +340,7 @@ def _debt_task(label: str, url: str, exhibit_no: str, desc: str, source: Filing,
         short = "Form of " + short
     when = cls.agreement_date(desc[:300])
     stem = f"{when.isoformat()} {short}" if when else short
-    task = Task(label, url, cls.safe_filename(stem), source.form, source.filing_date, None, desc)
+    task = Task(label, url, cls.safe_filename(stem), source.form, source.filing_date, None, desc, doc_date=when)
     task.description = f"Ex. {exhibit_no}: {short}" if exhibit_no else short
     return task
 
@@ -275,24 +362,40 @@ def execute(plan: Plan, renderer: Renderer, out_dir: Path, log: Callable[[str], 
             continue
         log(f"  [{i}/{len(plan.tasks)}] {t.category}/{path.name}")
         try:
-            t.path = renderer.save(t.url, stem)
+            client = plan.site_client if t.source != "EDGAR" else None
+            t.path = renderer.save(t.url, stem, client)
             t.status = "ok"
         except Exception as e:  # keep going; record the failure in the index
             t.status = f"failed: {e}"
             log(f"    failed: {e}")
     write_index(plan, root)
+    write_not_found(plan, root)
     return root
+
+
+def write_not_found(plan: Plan, root: Path) -> None:
+    path = root / "not_found.csv"
+    if not plan.missing:
+        path.unlink(missing_ok=True)
+        return
+    with open(path, "w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(["category", "document", "expected_because", "where_to_look"])
+        for m in plan.missing:
+            w.writerow([m.category, m.document, m.expected_because, m.where_to_look])
 
 
 def write_index(plan: Plan, root: Path) -> None:
     root.mkdir(parents=True, exist_ok=True)
     with open(root / "index.csv", "w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
-        w.writerow(["category", "file", "form", "filing_date", "period", "description", "source_url", "status"])
+        w.writerow(["category", "file", "source", "form", "filing_date", "period", "description", "source_url",
+                    "status"])
         for t in plan.tasks:
             w.writerow([
                 t.category,
                 str(t.path.relative_to(root)) if t.path else "",
+                t.source,
                 t.form,
                 t.filing_date.isoformat() if t.filing_date else "",
                 t.period.isoformat() if t.period else "",

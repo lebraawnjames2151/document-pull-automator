@@ -6,7 +6,7 @@ import html as htmlmod
 import re
 from pathlib import Path
 
-from .edgar import EdgarClient, decode
+from .edgar import EdgarClient, HttpClient, decode
 
 _HEAD = re.compile(r"<head[^>]*>", re.I)
 
@@ -59,10 +59,11 @@ class Renderer:
             return dest_stem.with_name(dest_stem.name + ".pdf")
         return dest_stem.with_name(dest_stem.name + (".txt" if ext == ".txt" else ".html"))
 
-    def save(self, url: str, dest_stem: Path) -> Path:
+    def save(self, url: str, dest_stem: Path, client: HttpClient | None = None) -> Path:
+        """`client` overrides the EDGAR client, e.g. for documents on a company website."""
         path = self.target_path(url, dest_stem)
         path.parent.mkdir(parents=True, exist_ok=True)
-        raw = self.client.get_bytes(url)
+        raw = (client or self.client).get_bytes(url)
         is_txt = url.lower().endswith(".txt")
 
         if url.lower().endswith(".pdf"):

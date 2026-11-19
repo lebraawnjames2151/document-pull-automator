@@ -25,15 +25,10 @@ class AmbiguousCompany(EdgarError):
         super().__init__(f"'{query}' matched {len(candidates)} companies")
 
 
-class EdgarClient:
-    """HTTP client that respects SEC fair-access rules (User-Agent, <10 req/s)."""
+class HttpClient:
+    """Throttled HTTP client with retries."""
 
     def __init__(self, user_agent: str, min_interval: float = 0.12, max_retries: int = 5):
-        if not user_agent or "@" not in user_agent:
-            raise EdgarError(
-                "SEC requires a User-Agent with a name and contact email, "
-                "e.g. 'Acme Research jane@acme.com'. Set SEC_USER_AGENT or pass --user-agent."
-            )
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": user_agent, "Accept-Encoding": "gzip, deflate"})
         self.user_agent = user_agent
@@ -89,6 +84,18 @@ class EdgarClient:
         r.close()
         self._heads[url] = decode(buf)
         return self._heads[url]
+
+
+class EdgarClient(HttpClient):
+    """HTTP client that respects SEC fair-access rules (User-Agent, <10 req/s)."""
+
+    def __init__(self, user_agent: str, min_interval: float = 0.12, max_retries: int = 5):
+        if not user_agent or "@" not in user_agent:
+            raise EdgarError(
+                "SEC requires a User-Agent with a name and contact email, "
+                "e.g. 'Acme Research jane@acme.com'. Set SEC_USER_AGENT or pass --user-agent."
+            )
+        super().__init__(user_agent, min_interval, max_retries)
 
 
 def decode(data: bytes) -> str:

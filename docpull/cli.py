@@ -26,6 +26,10 @@ def main(argv: list[str] | None = None) -> int:
                    help=f"Periodic forms to pull (default {','.join(DEFAULT_FORMS)})")
     p.add_argument("--no-earnings", action="store_true", help="Skip 8-K earnings releases")
     p.add_argument("--no-debt", action="store_true", help="Skip indentures and credit agreements")
+    p.add_argument("--site", default="auto",
+                   help="Company website to search after EDGAR. Default 'auto': found from the AIF, "
+                        "for 40-F/20-F filers only. Pass a URL to search any company's site.")
+    p.add_argument("--no-site", action="store_true", help="Do not search the company website")
     p.add_argument("--dry-run", action="store_true", help="List what would be downloaded without downloading")
     p.add_argument("--user-agent", default=os.environ.get("SEC_USER_AGENT", ""),
                    help="SEC User-Agent: 'Your Name your@email.com' (or set SEC_USER_AGENT)")
@@ -56,9 +60,16 @@ def main(argv: list[str] | None = None) -> int:
                 continue
 
             plan = plan_documents(client, company, args.years, forms,
-                                  earnings=not args.no_earnings, debt=not args.no_debt)
+                                  earnings=not args.no_earnings, debt=not args.no_debt,
+                                  site=None if args.no_site else args.site)
             for w in plan.warnings:
                 print(f"  warning: {w}")
+            for n in plan.notes:
+                print(f"  {n}")
+            if plan.missing:
+                print("  NOT FOUND on EDGAR or the company website:")
+                for m in plan.missing:
+                    print(f"    - [{m.category}] {m.document}  ({m.expected_because}. {m.where_to_look})")
             counts = Counter(t.category for t in plan.tasks)
             print("  " + ", ".join(f"{k}: {v}" for k, v in sorted(counts.items())))
             if args.dry_run:
