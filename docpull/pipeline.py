@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import re
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
@@ -57,6 +58,7 @@ class Plan:
     notes: list[str] = field(default_factory=list)
     missing: list[Missing] = field(default_factory=list)
     site_client: HttpClient | None = None
+    site_docs: list = field(default_factory=list)
 
     def add(self, task: Task) -> None:
         task.url = cls.normalize_url(task.url)
@@ -84,12 +86,21 @@ def plan_documents(
     log: Callable[[str], None] = print,
 ) -> Plan:
     """`site`: "auto" crawls the company website for 40-F/20-F filers, a URL crawls that site
-    for any company, None skips the website."""
+    for any company, None skips the website. A company with cik 0 is not on EDGAR: everything
+    comes from the website."""
     since = date.today() - timedelta(days=round(365.25 * years))
     plan = Plan(company)
-    filings = list_filings(client, company.cik, since)
+    on_edgar = bool(company.cik)
+    filings = list_filings(client, company.cik, since) if on_edgar else []
     window = [f for f in filings if f.filing_date >= since]
-    log(f"{company.folder_name}: {len(window)} filings since {since}")
+    if on_edgar:
+        log(f"{company.folder_name}: {len(window)} EDGAR filings since {since}")
+        if not window:
+            plan.warnings.append(
+                f"EDGAR company '{company.name}' (CIK {company.cik}) has no filings since {since}. Ticker "
+                "lookup only knows US tickers: if you meant a Canadian company, pass its name and --site.")
+    else:
+        log(f"{company.folder_name}: not on EDGAR, using the company website only")
 
     # --- Periodic reports ------------------------------------------------------------
     for f in window:
@@ -118,7 +129,7 @@ def plan_documents(
                         plan.add(Task(EARNINGS, d.url, cls.safe_filename(stem), f.form, f.filing_date,
                                       f.report_date, d.description))
 
-    if debt:
+    if debt and on_edgar:
         _plan_debt_documents(client, filings, plan, log)
 
     foreign = any(f.form in FOREIGN_ANNUAL for f in filings[:400])
@@ -128,10 +139,14 @@ def plan_documents(
         site_url = sitemod.website_from_text(aif[1]) if aif else None
         if site_url is None:
             plan.warnings.append("Company website not found in the AIF. Pass --site URL to search it.")
+    if not on_edgar and site_url is None:
+        plan.warnings.append("Not on EDGAR and no website given, so nothing to search. Pass --site URL.")
     if site_url:
-        _plan_company_site(plan, site_url, since, debt, log)
+        _plan_company_site(plan, site_url, since, debt, reports=not on_edgar, log=log)
+        if aif is None and not on_edgar:
+            aif = _site_aif(plan)
     if debt and aif:
-        _check_material_contracts(plan, aif)
+        _check_material_contracts(plan, aif, on_edgar)
     return plan
 
 
@@ -148,15 +163,18 @@ def _latest_aif(client: EdgarClient, filings: list[Filing]) -> tuple[str, str] |
     return None
 
 
-def _plan_company_site(plan: Plan, site_url: str, since: date, debt: bool, log) -> None:
+def _plan_company_site(plan: Plan, site_url: str, since: date, debt: bool, reports: bool, log) -> None:
     """Second channel after EDGAR: transcripts, presentations and debt documents on the
-    company's own website."""
+    company's own website. With `reports` (company not on EDGAR) also AIF, MD&A, financial
+    statements, press releases and circulars."""
     plan.site_client = HttpClient("Mozilla/5.0 (compatible; docpull/0.1)", min_interval=1.0)
     try:
-        docs = sitemod.crawl(plan.site_client, site_url, log=log)
+        docs = sitemod.crawl(plan.site_client, site_url, reports=reports,
+                             years=range(since.year, date.today().year + 2), log=log)
     except EdgarError as e:
         plan.warnings.append(f"Could not read company website {site_url}: {e}")
         return
+    plan.site_docs = docs
     for d in docs:
         is_debt = d.category in (cls.INDENTURE, cls.CREDIT)
         if is_debt and not debt:
@@ -167,7 +185,24 @@ def _plan_company_site(plan: Plan, site_url: str, since: date, debt: bool, log) 
         plan.add(Task(d.category, d.url, d.name, "website", None, None, d.text, doc_date=when, source="company website"))
 
 
-def _check_material_contracts(plan: Plan, aif: tuple[str, str]) -> None:
+def _site_aif(plan: Plan) -> tuple[str, str] | None:
+    """URL and text of the latest Annual Information Form posted on the company website."""
+    aifs = sorted((d for d in plan.site_docs if d.category == sitemod.AIF), key=lambda d: d.recency)
+    if not aifs:
+        plan.warnings.append("No Annual Information Form found on the company website, so missing "
+                             "debt documents cannot be checked.")
+        return None
+    latest = aifs[-1]
+    try:
+        text = sitemod.pdf_text(plan.site_client.get_bytes(latest.url))
+    except Exception as e:
+        plan.warnings.append(f"Could not read AIF {latest.url}: {e}")
+        return None
+    plan.notes.append(f"Checked material contracts against AIF: {latest.name}")
+    return latest.url, text
+
+
+def _check_material_contracts(plan: Plan, aif: tuple[str, str], on_edgar: bool = True) -> None:
     """Compare debt documents the AIF lists as material contracts with what was found."""
     found = [t for t in plan.tasks if t.category in (cls.INDENTURE, cls.CREDIT)]
     listed = [(item, cls.classify(item)) for item in sitemod.material_contracts(aif[1])]
@@ -176,16 +211,21 @@ def _check_material_contracts(plan: Plan, aif: tuple[str, str]) -> None:
         plan.notes.append("AIF Material Contracts lists no indentures or credit agreements.")
         return
     hits = 0
+    searched = "EDGAR or the company website" if on_edgar else "the company website"
     for item, label in listed:
-        when = cls.agreement_date(item)
+        # Only a date in the item's own heading identifies it. 'as described in the prospectus
+        # dated ...' or 'as amended by the amendment dated ...' are other documents' dates.
+        head = re.split(r",?\s+as (?:described|amended|supplemented)\b", item, maxsplit=1, flags=re.I)[0]
+        when = cls.agreement_date(head)
         if when and any(t.category == label and t.doc_date == when for t in found):
             hits += 1
             continue
+        name = re.sub(r"^the\s+", "", re.split(r",?\s+as described\b", item, maxsplit=1, flags=re.I)[0], flags=re.I)
         plan.missing.append(Missing(
             label,
-            f"{when.isoformat() + ' ' if when else ''}{cls.short_description(item)}",
-            "Listed in AIF Material Contracts" + ("" if when else " (no date to match on)"),
-            "Not found on EDGAR or the company website. Check SEDAR+.",
+            f"{when.isoformat() + ' ' if when else ''}{name[:240]}",
+            "Listed in AIF Material Contracts" + ("" if when else " (no agreement date in the AIF to match on)"),
+            f"Not found on {searched}. Check SEDAR+.",
         ))
     plan.notes.append(f"AIF Material Contracts lists {len(listed)} debt documents: {hits} found, "
                       f"{len(listed) - hits} not found.")

@@ -42,6 +42,18 @@ SEDAR+ itself is not searched. It has no API, and its terms of use prohibit auto
 
 `--site https://company.com/investors/` searches a website for any company, including US ones. `--no-site` skips the website.
 
+### Canadian companies that are not on EDGAR
+
+Companies listed only in Canada (e.g. Dye & Durham) have no EDGAR filings. Pass the name and the investor website:
+
+```bash
+docpull "Dye & Durham" --site https://dyedurham.com/investors/
+```
+
+Everything then comes from the website: AIF, MD&A, financial statements, press releases, circulars, presentations and transcripts. The not-found check reads the latest AIF PDF posted on the site.
+
+Ticker lookup only knows US tickers. A Canadian ticker can match an unrelated US company (`DND` resolves to DND Technologies Inc.). The tool warns when the matched company has no recent filings. Use the company name for Canadian-only issuers.
+
 ## Setup
 
 ```bash
@@ -87,7 +99,8 @@ Re-running is safe. Files that already exist are skipped, so a re-run only fetch
 - **Foreign issuers' credit agreements** are often not filed on EDGAR at all. Canadian issuers usually file them on SEDAR+ only, when they file them at all.
 - **Canadian SEDAR+ filings** are not searched (no API; terms prohibit automated access). `not_found.csv` lists the debt documents to look up there manually.
 - **The not-found check covers debt documents listed in the AIF only.** A supplemental indenture is not checked individually when the AIF lists it together with its base indenture. Items without a date cannot be matched and are always reported.
-- **Company websites vary.** The crawl uses link text and file names, so a site that labels documents oddly or loads them with JavaScript may return little. Website documents are filtered by year, not exact date.
+- **Company websites vary.** The crawl uses link text and file names, so a site that labels documents oddly or loads them with JavaScript may return little. Website documents are filtered by the year in their file name or link text, not exact date. Files with no year in the name fall back to the upload folder's year, so a few older documents can slip into the window.
+- **AIF items without their own date are always reported as not found**, even if a matching document was found. Many AIFs (e.g. Dye & Durham's) describe contracts by name only, so there is nothing reliable to match on.
 - Classification uses keyword rules. Unusual titles can be missed or misfiled. `index.csv` lists the source URL for every file so you can check.
 
 ## Tests

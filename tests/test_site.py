@@ -47,3 +47,45 @@ def test_material_contracts():
 
 def test_material_contracts_absent():
     assert site.material_contracts("No such section here") == []
+
+
+def test_year_variants():
+    url = "https://x.com/investors/financial-reports/?_sft_financial_year=2026"
+    assert site._year_variants(url, range(2024, 2026)) == [
+        "https://x.com/investors/financial-reports/",
+        "https://x.com/investors/financial-reports/?_sft_financial_year=2024",
+        "https://x.com/investors/financial-reports/?_sft_financial_year=2025",
+    ]
+    assert site._year_variants("https://x.com/investors/", range(2024, 2026)) == []
+
+
+def test_reports_categories():
+    up = "https://dyedurham.com/wp-content/uploads/2026/"
+    assert site.categorize("Q1", up + "FY26-Q1-MDA-FINAL.pdf", reports=True) == site.MDA
+    assert site.categorize("Q3", up + "FY26-Q3-FS.pdf", reports=True) == site.FINANCIALS
+    assert site.categorize("AR", up + "DD-FY2026-AIF-Filing-Version.pdf", reports=True) == site.AIF
+    assert site.categorize("Q4", up + "DD-Draft-Press-release-re-Q4-2026-Financials.pdf", reports=True) == site.PRESS
+    assert site.categorize("Q3", up + "FY26-Q3-MDA.pdf") is None  # reports only when not on EDGAR
+
+
+DD_AIF = """MATERIAL CONTRACTS ........................ 70 EXPERTS ......... 70 ... MATERIAL CONTRACTS The only
+material contracts ... still in effect, are as follows: • the IPO Underwriting Agreement, as described in the
+Company's IPO prospectus dated July 13, 2020; • the Original Indenture, as described in the Company's prospectus
+supplement dated February 18, 2021; • the Senior Credit Agreement, as amended by the first amendment to the Senior
+Credit Agreement dated September 26, 2025; and • the SRP as described herein. Copies of these agreements are
+available under the Company's profile on SEDAR+. EXPERTS The Company's auditor"""
+
+
+def test_material_contracts_skips_dotted_toc():
+    items = site.material_contracts(DD_AIF)
+    assert items[0].startswith("the IPO Underwriting Agreement")
+    assert any(i.startswith("the Original Indenture") for i in items)
+    assert any(i.startswith("the Senior Credit Agreement, as amended") for i in items)
+
+
+def test_year_prefers_file_name_over_upload_folder():
+    up = "https://dyedurham.com/wp-content/uploads/2023/06/"
+    assert site._year("Q1", up + "Dye-Durham-Financial-Statements-Q1-2021.pdf") == 2021
+    assert site._year("Q1", up + "DD-FY24-Q1-MDA.pdf") == 2024
+    assert site._year("Q1", up + "DD_FY24_Q1_MDA.pdf") == 2024
+    assert site._year("AR", up + "DD-MIC.pdf") == 2023  # nothing in the name: folder year

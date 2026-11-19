@@ -8,7 +8,7 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-from .edgar import AmbiguousCompany, EdgarClient, EdgarError, resolve_company
+from .edgar import AmbiguousCompany, Company, EdgarClient, EdgarError, resolve_company
 from .pipeline import DEFAULT_FORMS, execute, plan_documents
 from .render import Renderer
 
@@ -55,9 +55,12 @@ def main(argv: list[str] | None = None) -> int:
                 status = 1
                 continue
             except EdgarError as e:
-                print(e, file=sys.stderr)
-                status = 1
-                continue
+                if args.site in ("auto", None) or args.no_site:
+                    print(f"{e}. If it is not an SEC filer, pass --site with its investor website.",
+                          file=sys.stderr)
+                    status = 1
+                    continue
+                company = Company(0, query)  # not on EDGAR: website only
 
             plan = plan_documents(client, company, args.years, forms,
                                   earnings=not args.no_earnings, debt=not args.no_debt,
