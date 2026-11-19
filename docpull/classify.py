@@ -14,7 +14,7 @@ CREDIT = "Credit Agreements"
 
 _EXCLUDE = re.compile(
     r"description of (the )?(registrant|securities|capital stock|common stock)"
-    r"|trust indenture act|statement of eligibility|form t-1"
+    r"|statement of eligibility|form t-1"
     r"|equity incentive|stock (option|incentive|purchase) plan|employment agreement|severance"
     r"|indemnification agreement|underwriting agreement|registration rights",
     re.I,
@@ -160,7 +160,8 @@ def exhibit_links(html: str, base_url: str) -> list[ExhibitLink]:
 # --------------------------------------------------------------------------- naming helpers
 
 _DATED = re.compile(
-    r"dated\s+(?:as\s+of\s+)?([A-Z][a-z]+\.?\s+\d{1,2},?\s+\d{4})",
+    r"dated\s+(?:as\s+of\s+)?([A-Za-z]{3,9}\.?\s+\d{1,2},?\s+\d{4})",
+    re.I,
 )
 
 
@@ -168,7 +169,7 @@ def agreement_date(desc: str) -> date | None:
     m = _DATED.search(desc)
     if not m:
         return None
-    raw = m.group(1).replace(".", "").replace(",", "").replace("Sept ", "Sep ")
+    raw = m.group(1).replace(".", "").replace(",", "").title().replace("Sept ", "Sep ")
     for fmt in ("%B %d %Y", "%b %d %Y"):
         try:
             return datetime.strptime(raw, fmt).date()
@@ -192,6 +193,8 @@ def short_description(desc: str, limit: int = 110) -> str:
     desc = re.split(r"\((?:incorporated|filed|previously|included)", desc, maxsplit=1, flags=re.I)[0]
     desc = re.sub(r"\s+", " ", desc).strip(" ,.;:-")
     title = _PARTIES.split(desc, maxsplit=1)[0].strip(" ,.;:-")
+    if title.isupper():  # cover-page titles like 'INDENTURE'
+        title = title.title()
     extra = ""
     subj = _SUBJECT.search(desc)
     if subj:
@@ -206,6 +209,65 @@ def short_description(desc: str, limit: int = 110) -> str:
         title = title[: int(limit * 0.75)]
     out = f"{title} - {extra}" if extra and extra.lower() not in title.lower() else title
     return out[:limit].rstrip(" ,.;:-")
+
+
+_NOTE_SERIES = re.compile(
+    r"\d+(?:\.\d+)?%\s+(?:(?:senior|secured|unsecured|subordinated|convertible|guaranteed)\s+)*"
+    r"(?:notes|debentures|bonds)\s+due\s+\d{4}",
+    re.I,
+)
+_COVER_END = re.compile(r"table of contents|cross-reference table|reconciliation and tie|\barticle\s+(?:1|i)\b", re.I)
+_TITLE_LEAD = re.compile(
+    r"^(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|supplemental"
+    r"|amended|and|restated|base|senior|subordinated|secured|incremental|revolving|term|loan|note)$",
+    re.I,
+)
+
+
+_TITLE_STOP = re.compile(r"^(dated|among|between|by|as|of|for|to|with|in)\b", re.I)
+
+
+def cover_description(text: str, pos: int, limit: int = 110) -> str:
+    """Name a document from its cover page. `pos` is where classify_at() matched.
+
+    'TECK ... as Trustee FIFTH SUPPLEMENTAL INDENTURE dated as of August 8, 2012 ... designated
+    2.500% Notes due 2018 3.750% Notes due 2023' becomes
+    'Fifth Supplemental Indenture - 2.500% Notes due 2018, 3.750% Notes due 2023'.
+    """
+    after = text[pos:].split()
+    if not after or not after[0].isupper():  # match was in running text, not a cover title
+        return short_description(text[pos:], limit)
+    title_words = []
+    for w in after[:8]:
+        if not (w.isupper() and re.sub(r"[^A-Za-z]", "", w)) or _TITLE_STOP.match(w):
+            break
+        title_words.append(w)
+    for w in reversed(text[:pos].split()[-4:]):
+        if not (w.isupper() and _TITLE_LEAD.match(w)):
+            break
+        title_words.insert(0, w)
+    title = " ".join(title_words).title()
+
+    end = _COVER_END.search(text, pos)
+    cover = text[: end.start()] if end else text[: pos + 800]
+    series = list(dict.fromkeys(re.sub(r"\s+", " ", m.group(0)) for m in _NOTE_SERIES.finditer(cover)))
+    extra = ", ".join(series)
+    if not extra:
+        agent = _AGENT.search(cover)
+        if agent:
+            name = re.split(r"\band\b", agent.group(1))[-1].strip(" ,")
+            name = re.sub(r"^the\s+", "", name, flags=re.I)
+            extra = f"{name}, {agent.group(2).lower()} agent"
+    out = f"{title} - {extra}" if extra else title
+    return out[:limit].rstrip(" ,.;:-")
+
+
+_FORM_OF = re.compile(r"\bform of\b|dated\s+(as\s+of\s+)?\[", re.I)
+
+
+def is_form_of(desc: str) -> bool:
+    """Unexecuted template, e.g. a shelf registration's 'Indenture dated as of [ ]'."""
+    return bool(_FORM_OF.search(desc[:400]))
 
 
 _BAD_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]')

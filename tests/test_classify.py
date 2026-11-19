@@ -113,3 +113,51 @@ def test_exhibit_links():
 )
 def test_report_title(opening, expected):
     assert cls.report_title(opening) == expected
+
+
+@pytest.mark.parametrize(
+    "opening, expected",
+    [
+        (
+            "Exhibit 99.1 Execution Copy TECK RESOURCES LIMITED, TECK METALS LTD., as Guarantor and THE BANK OF "
+            "NEW YORK MELLON, as Trustee FIFTH SUPPLEMENTAL INDENTURE dated as of August 8, 2012 Supplemental to "
+            "Indenture dated as of August 17, 2010 Creating series of Securities designated 2.500% Notes due 2018 "
+            "3.750% Notes due 2023 5.400% Notes due 2043 TABLE OF CONTENTS Page 1. INTERPRETATIONS 2 1.1 Fifth "
+            "Supplemental Indenture 2 6.25% Notes due 2099",
+            "Fifth Supplemental Indenture - 2.500% Notes due 2018, 3.750% Notes due 2023, 5.400% Notes due 2043",
+        ),
+        (
+            "EXHIBIT 99.1 EXECUTION VERSION TECK RESOURCES LIMITED, as Issuer 3.900% Notes Due 2030 INDENTURE "
+            "Dated as of June 30, 2020 THE BANK OF NEW YORK MELLON, as Trustee CROSS-REFERENCE TABLE TIA Section",
+            "Indenture - 3.900% Notes Due 2030",
+        ),
+        (
+            "Exhibit 7.1 TECK RESOURCES LIMITED AND THE BANK OF NEW YORK MELLON, as Trustee INDENTURE Dated as of "
+            "[ ] TECK RESOURCES LIMITED Reconciliation and tie between Trust Indenture Act of 1939 and Indenture",
+            "Indenture",
+        ),
+        (
+            "EXECUTION VERSION CREDIT AGREEMENT dated as of August 14, 2026, among Carvana Co., the lenders party "
+            "thereto and Barclays Bank PLC, as administrative agent TABLE OF CONTENTS",
+            "Credit Agreement - Barclays Bank PLC, administrative agent",
+        ),
+    ],
+)
+def test_cover_description(opening, expected):
+    label, pos = cls.classify_at(opening)
+    assert cls.cover_description(opening, pos) == expected
+
+
+def test_real_indenture_cover_not_excluded_as_t1():
+    # Indenture covers cite the Trust Indenture Act; only the T-1 eligibility statement is excluded.
+    cover = "TECK RESOURCES LIMITED AND THE BANK OF NEW YORK MELLON, as Trustee INDENTURE Dated as of [ ] " \
+            "Reconciliation and tie between Trust Indenture Act of 1939 and Indenture"
+    assert cls.classify(cover) == cls.INDENTURE
+    assert cls.is_form_of(cover[cover.index("INDENTURE"):])
+
+
+def test_cover_title_stops_at_dated():
+    opening = "TECK RESOURCES LIMITED FIRST SUPPLEMENTAL INDENTURE DATED JUNE 25, 2009 TABLE OF CONTENTS"
+    label, pos = cls.classify_at(opening)
+    assert cls.cover_description(opening, pos) == "First Supplemental Indenture"
+    assert cls.agreement_date(opening[pos:]) == date(2009, 6, 25)

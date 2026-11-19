@@ -21,6 +21,13 @@ Files are saved as PDF (default) or as the original HTML.
 3. **8-Ks filed after the latest periodic report** under Item 1.01 or 2.03. EX-4 and EX-10 exhibits are classified from their opening text when EDGAR's description is generic.
 4. **6-Ks** (foreign issuers). Exhibits whose title is an indenture or credit agreement.
 
+Foreign issuers that file 40-F or 20-F (e.g. Canadian MJDS filers) often leave indentures out of the annual report. For them, two more EDGAR sources are searched across the company's full filing history:
+
+5. **Registration statements (F-10, F-9, F-3, F-4, F-1).** Their hyperlinked exhibit lists, plus the indenture attached as Exhibit 7.1 (F-9/F-10) or 4.x (F-1/F-3/F-4).
+6. **6-Ks filed within 30 days after a prospectus supplement (SUPPL, 424B2, 424B5).** Executed base and supplemental indentures are usually filed then, at closing.
+
+Names come from the document's cover page where possible, e.g. `2012-08-08 Fifth Supplemental Indenture - 2.500% Notes due 2018, 3.750% Notes due 2023, 5.400% Notes due 2043.pdf`. Unexecuted templates from shelf registrations are prefixed `Form of`.
+
 ## Setup
 
 ```bash
@@ -62,7 +69,8 @@ Re-running is safe. Files that already exist are skipped, so a re-run only fetch
 - **Research reports and earnings call transcripts are not included.** They are licensed content. Adding them requires API access from a vendor (e.g. Bloomberg, S&P Capital IQ) and is not built yet.
 - **144A-for-life and private-company debt docs** are generally not on EDGAR and cannot be pulled.
 - **Annual reports filed before 2017** have no hyperlinked exhibit index, so older debt docs need the 8-K scan or a manual check. A warning is printed when an annual report has no hyperlinks.
-- **Canadian (40-F) issuers** often file indentures with shelf registration statements (F-10) rather than listing them in the 40-F. These are not scanned yet.
+- **Debt docs for foreign issuers come from full history, not just what is in force.** Indentures for notes that have since been repaid are included. Check maturities before relying on a document.
+- **Foreign issuers' credit agreements** are often not filed on EDGAR at all. Canadian issuers usually file them on SEDAR+ only, when they file them at all.
 - **Canadian SEDAR+ filings** are not covered, only what is also filed on EDGAR.
 - Classification uses keyword rules. Unusual titles can be missed or misfiled. `index.csv` lists the source URL for every file so you can check.
 

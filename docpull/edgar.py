@@ -40,6 +40,7 @@ class EdgarClient:
         self.min_interval = min_interval
         self.max_retries = max_retries
         self._last = 0.0
+        self._heads: dict[str, str] = {}
 
     def _throttle(self) -> None:
         wait = self.min_interval - (time.monotonic() - self._last)
@@ -77,6 +78,8 @@ class EdgarClient:
 
     def get_head_text(self, url: str, nbytes: int = 96_000) -> str:
         """First `nbytes` of a document, without downloading the whole thing."""
+        if url in self._heads:
+            return self._heads[url]
         r = self.get(url, stream=True)
         buf = b""
         for chunk in r.iter_content(16_384):
@@ -84,7 +87,8 @@ class EdgarClient:
             if len(buf) >= nbytes:
                 break
         r.close()
-        return decode(buf)
+        self._heads[url] = decode(buf)
+        return self._heads[url]
 
 
 def decode(data: bytes) -> str:

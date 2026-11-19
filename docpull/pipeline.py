@@ -13,7 +13,14 @@ from .edgar import Company, EdgarClient, EdgarError, Filing, filing_documents, l
 from .render import Renderer
 
 ANNUAL = {"10-K", "20-F", "40-F"}
+FOREIGN_ANNUAL = {"20-F", "40-F"}
 QUARTERLY = {"10-Q"}
+# Shelf/registration statements. Under Forms F-9/F-10 the indenture is Exhibit 7.1;
+# under F-1/F-3/F-4 it is Exhibit 4.x.
+REGISTRATION = {"F-1", "F-3", "F-4", "F-9", "F-10"}
+# Prospectus supplements mark a debt offering; executed indentures follow on a 6-K at closing.
+OFFERING = {"SUPPL", "424B2", "424B5"}
+OFFERING_CLOSE_DAYS = 30
 DEFAULT_FORMS = ("10-K", "10-Q", "20-F", "40-F", "6-K")
 EARNINGS = "Earnings Releases"
 
@@ -99,11 +106,11 @@ def plan_documents(
     return plan
 
 
-def _plan_6k(client: EdgarClient, f: Filing, plan: Plan) -> None:
+def _plan_6k(client: EdgarClient, f: Filing, plan: Plan, debt_only: bool = False) -> None:
     """6-Ks carry everything a foreign issuer publishes. Keep results/MD&A/financials and debt
     documents; skip the rest (press releases, notices, voting results)."""
     docs = filing_documents(client, f)
-    candidates = [d for d in docs if d.doc_type.upper().startswith("EX-99")]
+    candidates = [d for d in docs if d.doc_type.upper().startswith(("EX-99", "EX-4", "EX-10"))]
     if not candidates:
         candidates = [d for d in docs if d.doc_type.upper().startswith("6-K")]
     for d in candidates:
@@ -111,7 +118,9 @@ def _plan_6k(client: EdgarClient, f: Filing, plan: Plan) -> None:
         debt = cls.classify_at(opening[:400])
         if debt:
             label, pos = debt
-            plan.add(_debt_task(label, d.url, d.doc_type.removeprefix("EX-"), opening[pos:], f))
+            plan.add(_debt_task(label, d.url, d.doc_type.removeprefix("EX-"), opening, f, pos))
+            continue
+        if debt_only:
             continue
         title = cls.report_title(opening)
         if title:
@@ -156,6 +165,9 @@ def _plan_debt_documents(client: EdgarClient, filings: list[Filing], plan: Plan,
                 "check its exhibit index manually."
             )
 
+    if annual is not None and annual.form in FOREIGN_ANNUAL:
+        _plan_foreign_debt(client, filings, plan, log)
+
     latest_periodic = max((f.filing_date for f in sources), default=date.min)
     for f in filings:
         if f.filing_date <= latest_periodic:
@@ -166,18 +178,80 @@ def _plan_debt_documents(client: EdgarClient, filings: list[Filing], plan: Plan,
             t = d.doc_type.upper()
             if not (t.startswith("EX-4") or t.startswith("EX-10")):
                 continue
-            text = d.description
-            if cls.is_generic_description(text):
-                text = cls.document_opening(client.get_head_text(d.url))
-            found = cls.classify_at(text, t)
+            if not cls.is_generic_description(d.description):
+                label = cls.classify(d.description, t)
+                if label:
+                    plan.add(_debt_task(label, d.url, t.removeprefix("EX-"), d.description, f))
+                continue
+            opening = cls.document_opening(client.get_head_text(d.url))
+            found = cls.classify_at(opening, t)
             if found:
                 label, pos = found
-                plan.add(_debt_task(label, d.url, t.removeprefix("EX-"), text[pos:], f))
+                plan.add(_debt_task(label, d.url, t.removeprefix("EX-"), opening, f, pos))
 
 
-def _debt_task(label: str, url: str, exhibit_no: str, desc: str, source: Filing) -> Task:
-    short = cls.short_description(desc)
-    when = cls.agreement_date(desc)
+def _plan_foreign_debt(client: EdgarClient, filings: list[Filing], plan: Plan, log) -> None:
+    """Foreign private issuers (20-F/40-F) often leave indentures out of the annual report's
+    exhibit index. They do appear in:
+
+    1. Registration statements (F-10, F-9, F-3, ...): hyperlinked exhibit lists, plus the
+       indenture attached as EX-7.x / EX-4.x. Every registration in the company's history is read,
+       because base indentures from old shelves often still govern outstanding notes.
+    2. 6-Ks filed within OFFERING_CLOSE_DAYS after a prospectus supplement, which is when
+       executed indentures and supplemental indentures are usually filed.
+    """
+    for f in filings:
+        if _base_form(f.form) not in REGISTRATION or f.primary_doc.endswith(".paper"):
+            continue
+        before = len(plan.tasks)
+        try:
+            html = client.get_text(f.primary_url)
+            for link in cls.exhibit_links(html, f.folder_url):
+                label = cls.classify(link.description, "EX-" + link.exhibit_no)
+                if label:
+                    plan.add(_debt_task(label, link.url, link.exhibit_no, link.description, f))
+            for d in filing_documents(client, f):
+                t = d.doc_type.upper()
+                if not t.startswith(("EX-7", "EX-4")):
+                    continue
+                opening = cls.document_opening(client.get_head_text(d.url))
+                found = cls.classify_at(opening[:600], t)
+                if found:
+                    label, pos = found
+                    plan.add(_debt_task(label, d.url, t.removeprefix("EX-"), opening, f, pos))
+        except EdgarError as e:
+            plan.warnings.append(f"Could not read {f.form} {f.filing_date}: {e}")
+            continue
+        log(f"  {f.form} {f.filing_date}: {len(plan.tasks) - before} debt documents")
+
+    offerings = [f.filing_date for f in filings if _base_form(f.form) in OFFERING]
+    closings = [
+        f for f in filings
+        if _base_form(f.form) == "6-K"
+        and any(0 <= (f.filing_date - d).days <= OFFERING_CLOSE_DAYS for d in offerings)
+    ]
+    before = len(plan.tasks)
+    for f in closings:
+        try:
+            _plan_6k(client, f, plan, debt_only=True)
+        except EdgarError as e:
+            plan.warnings.append(f"Could not read 6-K {f.filing_date}: {e}")
+    if offerings:
+        log(f"  6-Ks after {len(offerings)} prospectus supplements: {len(plan.tasks) - before} debt documents")
+
+
+def _debt_task(label: str, url: str, exhibit_no: str, desc: str, source: Filing,
+               cover_pos: int | None = None) -> Task:
+    """`desc` is an exhibit-index description, or a document's opening text when `cover_pos`
+    (where the title was matched) is given."""
+    if cover_pos is None:
+        short = cls.short_description(desc)
+    else:
+        short = cls.cover_description(desc, cover_pos)
+        desc = desc[cover_pos:]
+    if cls.is_form_of(desc) and not short.lower().startswith("form of"):
+        short = "Form of " + short
+    when = cls.agreement_date(desc[:300])
     stem = f"{when.isoformat()} {short}" if when else short
     task = Task(label, url, cls.safe_filename(stem), source.form, source.filing_date, None, desc)
     task.description = f"Ex. {exhibit_no}: {short}" if exhibit_no else short
