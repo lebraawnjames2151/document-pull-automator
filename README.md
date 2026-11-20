@@ -70,6 +70,20 @@ SEC requires every automated request to identify you with a name and email. Set 
 export SEC_USER_AGENT="Your Name your.email@example.com"
 ```
 
+## Web page (no command line)
+
+```bash
+docpull-web
+```
+
+This opens a page in your browser with a form: company, optional investor website, how far back, and checkboxes for debt documents and earnings releases. Click **Pull documents**, watch the progress log, then click **Download zip**. The results page also lists any debt documents to look up on SEDAR+.
+
+- If `SEC_USER_AGENT` is not set, the page asks for your name and work email once and remembers it in the browser.
+- If a name matches several companies, the page shows them as buttons to pick from.
+- One pull runs at a time. A second request waits for the first to finish.
+- Pulls are kept in `output/web/` for 7 days, then deleted the next time the page is started.
+- By default only the computer running it can open the page. `docpull-web --host 0.0.0.0` lets others on the network use it at `http://<computer-name>:8765/`. There is no login, so only do this on a trusted internal network, and check with IT first.
+
 ## Usage
 
 ```bash
